@@ -10,42 +10,49 @@ import Nats
 
 class CWSLNats {
   static func send() async {
-    do {
-      // # Connecting to a NATS Server
-      //The first step is establishing a connection to a NATS server. This example demonstrates how to connect to a NATS server using the default settings, which assume the server is running locally on the default port (4222). You can also customize your connection by specifying additional options:
+    var subscription: NatsSubscription?
+    let nats: NatsClient
 
-      guard var ugoUrlString = OSFCModel.config().item(link: .ugoAddress)?.stringValue else {
+    do {
+      // 接続先URLの取得
+      guard let ugoUrlString = OSFCModel.config().item(link: .ugoAddress)?.stringValue,
+            let url = URL(string: ugoUrlString) else {
         return
       }
       print("ugoUrl: \(ugoUrlString)")
 
-      let nats = NatsClientOptions()
-        .url(URL(string: ugoUrlString)!)
-        //.url(URL(string: "nats://192.168.128.143:4222")!)
-        // 間違いのアドレスを入れてテスト（結果：Natsライブラリがエラー終了）
-        //.url(URL(string: "nats://192.168.128.128:4222")!)
+      // NATSクライアントの生成
+      nats = NatsClientOptions()
+        .url(url)
         .build()
 
-      print(nats)
-
+      // （オプション）接続イベントのリスナー設定
       nats.on(.connected) { event in
         print("event: connected")
       }
 
+      // サーバーへの接続
       try await nats.connect()
 
-      // # Publishing Messages
-      // Once you've established a connection to a NATS server, the next step is to publish messages. Publishing messages to a subject allows any subscribed clients to receive these messages asynchronously. This example shows how to publish a simple text message to a specific subject.
+      // 終了時に必ずクリーンアップを実施（非同期処理のためTask.detachedを利用）
+      defer {
+        Task.detached {
+          if let sub = subscription {
+            do {
+              try await sub.unsubscribe()
+            } catch {
+              print("Error unsubscribing: \(error)")
+            }
+          }
+          do {
+            try await nats.close()
+          } catch {
+            print("Error closing connection: \(error)")
+          }
+        }
+      }
 
-      //let data = "message text".data(using: .utf8)!
-      //try await nats.publish(data, subject: "foo.msg")
-
-      //let message = "{\"text\": \"こんにちは\", \"target_robot\": [\"UE04PA-A07420003\"]}"
-      // t: タイムスタンプ
-      // id: UUID生成が望ましい
-
-      // "flow_id" : "FLSrKTpwRZ-OG3sl",
-
+      // 送信メッセージの作成
       let message = """
         {
           "id" : "requestId",
@@ -69,54 +76,24 @@ class CWSLNats {
       let requestTopic = "flow.cmd"
 
       // 一時的なリプライトピックにサブスクライブ
-      let subscription = try await nats.subscribe(subject: replySubject)
+      subscription = try await nats.subscribe(subject: replySubject)
 
-      // リクエストを送信
+      // リクエストの送信（replySubjectを指定）
       try await nats.publish(payload, subject: requestTopic, reply: replySubject)
 
-      // サブジェクトが間違っていると503が返ってくる
-
       // レスポンスの待機
-      for try await message in subscription {
-        print (message)
-        guard let payload = message.payload else {
+      for try await msg in subscription! {
+        print(msg)
+        guard let payload = msg.payload,
+              let response = String(data: payload, encoding: .utf8) else {
           continue
         }
-        if let response = String(data: payload, encoding: .utf8) {
-          print("Received response: \(response)")
-          break // 応答を受け取ったらループを終了
-        }
+        print("Received response: \(response)")
+        break  // 応答を受信したらループを抜ける
       }
 
-      // サブスクリプションの終了
-      try await subscription.unsubscribe()
-
-      // # Subscribing to Subjects
-      // After establishing a connection and publishing messages to a NATS server, the next crucial step is subscribing to subjects. Subscriptions enable your client to listen for messages published to specific subjects, facilitating asynchronous communication patterns. This example will guide you through creating a subscription to a subject, allowing your application to process incoming messages as they are received.
-
-      /*
-      let subscription = try await nats.subscribe(subject: "foo.>")
-
-      for try await msg in subscription {
-
-        if msg.subject == "foo.done" {
-          break
-        }
-
-        if let payload = msg.payload {
-          print("received \(msg.subject): \(String(data: payload, encoding: .utf8) ?? "")")
-        }
-
-        if let headers = msg.headers {
-          if let headerValue = headers.get(try! NatsHeaderName("X-Example")) {
-            print("  header: X-Example: \(headerValue.description)")
-          }
-        }
-      }
-       */
     } catch {
       print("Error occurred: \(error)")
     }
   }
 }
-
