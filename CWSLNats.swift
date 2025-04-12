@@ -26,7 +26,7 @@ class CWSLNats {
         .url(url)
         .build()
 
-      // （オプション）接続イベントのリスナー設定
+      // 接続イベントのリスナー（任意）
       nats.on(.connected) { event in
         print("event: connected")
       }
@@ -34,7 +34,7 @@ class CWSLNats {
       // サーバーへの接続
       try await nats.connect()
 
-      // 終了時に必ずクリーンアップを実施（非同期処理のためTask.detachedを利用）
+      // 終了時に必ずクリーンアップを実施（非同期処理のため Task.detached を利用）
       defer {
         Task.detached {
           if let sub = subscription {
@@ -81,18 +81,40 @@ class CWSLNats {
       // リクエストの送信（replySubjectを指定）
       try await nats.publish(payload, subject: requestTopic, reply: replySubject)
 
-      // レスポンスの待機
-      for try await msg in subscription! {
-        print(msg)
-        guard let payload = msg.payload,
-              let response = String(data: payload, encoding: .utf8) else {
-          continue
+      // --- タイムアウト付きでレスポンスを待機 ---
+      // ここでは5秒でタイムアウトする例。
+      let response: String = try await withThrowingTaskGroup(of: String.self) { group in
+        // メッセージ受信待ちタスク
+        group.addTask {
+          for try await msg in subscription! {
+            guard let payload = msg.payload,
+                  let response = String(data: payload, encoding: .utf8) else {
+              continue
+            }
+            return response
+          }
+          // ループを抜けずに終了した場合はエラーにする
+          throw NSError(domain: "NoMessageReceived", code: 0, userInfo: nil)
         }
-        print("Received response: \(response)")
-        break  // 応答を受信したらループを抜ける
+
+        // タイムアウトタスク（5秒）
+        group.addTask {
+          try await Task.sleep(nanoseconds: 5_000_000_000)
+          throw NSError(domain: "Timeout", code: 1, userInfo: nil)
+        }
+
+        // 最初に完了したタスクの結果（応答 or タイムアウト）を返す
+        let result = try await group.next()!
+        // どちらにせよ他方のタスクは不要になるのでキャンセル
+        group.cancelAll()
+        return result
       }
 
+      // 応答を受信できた場合のみ到達
+      print("Received response: \(response)")
+
     } catch {
+      // 応答なし・タイムアウト等で here に入る
       print("Error occurred: \(error)")
     }
   }
